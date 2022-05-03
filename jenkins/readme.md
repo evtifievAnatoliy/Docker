@@ -1,5 +1,3 @@
-# prj-bse-gpu CI/CD
-
 ## Jenkins configuration
 ### Prerequisites
 1. run install.sh (installing Jenkins locally) optional
