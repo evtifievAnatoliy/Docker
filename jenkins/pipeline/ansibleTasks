@@ -1,0 +1,159 @@
+pipeline {
+    agent {
+        label 'master'
+    }
+    options {
+        ansiColor('xterm')
+    }
+    environment {
+            to_upload_path="/home/${ansible_name}/${to_upload}"
+            upload_links_path="/home/${ansible_name}/upload/${data_type}"
+            simlink_path="/var/opt/data"
+            ANSIBLE_FORCE_COLOR = true
+    }
+    stages {
+        stage('Create ansible config files') {
+            environment {
+                ANSIBLE_CFG = """
+[defaults]
+forks = 10
+inventory = hosts.yml
+hash_behaviour = merge
+host_key_checking = False
+retry_files_enabled = False
+command_warnings=False
+
+roles_path = roles
+
+[ssh_connection]
+ssh_args = -o ControlMaster=no
+#ssh_args = -o ForwardAgent=yes -o ControlMaster=auto -o ControlPersist=60s
+pipelining = True
+"""
+                HOSTS_YML = """
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+  children:
+    bse:
+      hosts:
+        ${ansible_host}:
+          ansible_host: ${ansible_host}
+          ansible_user: ${ansible_name}
+          ansible_private_key_file: ${ansible_ssh}
+"""
+                PLAYBOOK = """
+- name: GREATE LIBRARY AND UPLOAD STORAGE PLAYBOOK
+  hosts: bse
+  become: yes
+
+  tasks:
+
+  - name: "Check upload file : ${to_upload_path}"
+    stat:
+      path: "${to_upload_path}"
+    register: checkFileResponse
+    failed_when: not checkFileResponse.stat.exists
+
+  - name: "Debug Check upload file task"
+    debug:
+      msg: "The file ${to_upload_path} exist"
+    when: checkFileResponse.stat.exists
+
+  - name: "Removing all files from directory: ${upload_links_path}"
+    shell: "rm -rvf ${upload_links_path}/*"
+
+  - name: "Get up_load file contents. File: ${to_upload_path}"
+    command: "cat ${to_upload_path}"
+    register: file_content
+
+  - name: "File ${to_upload_path} contents: "
+    debug:
+      var: file_content.stdout
+
+  - name: "Check files in: ${simlink_path}"
+    stat:
+      path: "${simlink_path}/{{item}}"
+    register: checkLinkResponse
+    failed_when: not checkLinkResponse.stat.exists
+    loop: "{{ file_content.stdout.split() }}"
+
+  - name: "Create symbolic links from file lines: ${to_upload_path}"
+    ansible.builtin.file:
+      src: "${simlink_path}/{{item}}"
+      dest: "${upload_links_path}/{{item}}"
+      state: link
+    loop: "{{ file_content.stdout.split() }}"
+
+  - name: "Create library"
+    uri:
+      url: http://localhost:8088/api/library/${chosen_storage}?libraryName=${name_of_library}&type=${data_type}
+      method: POST
+      return_content: yes
+      body:
+        replicas: "${replicas}"
+        shards: "${shards}"
+      body_format: json
+      headers:
+        Content-Type: "application/json"
+      status_code: [200]
+    register: createLibraryResponse
+
+  - name: "Library ID"
+    debug:
+      msg: |
+        - Library id: {{ createLibraryResponse.json.id }}
+
+  - name: "UPLOAD  Storage"
+    uri:
+      url: http://localhost:8088/api/upload/storage/${chosen_storage}/library/id/{{ createLibraryResponse.json.id }}?libraryType=${data_type}&storage=${chosen_storage}
+      method: GET
+      return_content: yes
+      headers:
+        Content-Type: "application/json"
+      status_code: [200]
+    register: checkLibraryResponse
+
+  - name: "Storage response"
+    debug:
+      msg: |
+        - Response: {{ checkLibraryResponse.content }}
+
+"""
+            }
+            steps {
+                echo 'Creating....'
+                script {
+                    writeFile(file: 'ansible.cfg', text: env.ANSIBLE_CFG)
+                    writeFile(file: 'hosts.yml', text: env.HOSTS_YML)
+                    writeFile(file: 'playbook.yml', text: env.PLAYBOOK)
+                    // sh "ls -l"
+                }
+            }
+        }
+        stage('Run ansible playbook') {
+            steps {
+                echo 'Runing ansible....'
+                sh 'ansible --version'
+                sh 'ansible-playbook playbook.yml'
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                if (fileExists('ansible.cfg')) {
+                    sh 'rm ansible.cfg'
+                }
+                if (fileExists('hosts.yml')) {
+                    sh 'rm hosts.yml'
+                }
+                if (fileExists('playbook.yml')) {
+                    sh 'rm playbook.yml'
+                }
+                // sh "ls -a"
+            }
+        }
+    }
+}
